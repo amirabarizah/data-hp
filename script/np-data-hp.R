@@ -168,5 +168,15 @@ data_hp <-
   select(month, quarter, mukim, kampong:`Source(s)`)
 
 #transfer cleaned version
-write_xlsx(data_hp, path = "data/data-hp-cl.xlsx")
+write_xlsx(data_hp, path = "data/data-hp-date.xlsx")
 
+data_hp <- data_hp %>%
+  mutate(
+    year = as.numeric(sub(" .*", "", quarter)),
+    date = dmy(paste("1", month, year))
+  )
+
+colnames(data_hp)
+data_hp <- data_hp |>
+  select(quarter, date, mukim, kampong, price, type, storey, status, land_size, floor_size,
+         beds, baths, land_type, public_tender, `Additional Remark(s)`, Agent, `Source(s)`)

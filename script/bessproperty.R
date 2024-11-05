@@ -1,0 +1,552 @@
+library(lubridate)
+library(dplyr)
+library(rvest)
+library(tidyr)
+library(stringr)
+
+bessproperty <- final_data
+
+bessproperty <- bessproperty |>
+  select(-Code, -Units) |>
+  distinct() |>
+  filter_all(all_vars(!grepl("LAND FOR SALE", ., ignore.case = TRUE))) |>
+  filter_all(all_vars(!grepl("Location", ., ignore.case = TRUE))) |>
+  filter_all(all_vars(!grepl("RENT", ., ignore.case = TRUE))) |>
+  filter_all(all_vars(!grepl("SHOP HOUSE", ., ignore.case = TRUE))) |>
+  arrange(desc(date)) |>
+  filter(!is.na(Price)) |>
+  mutate(Location = ifelse(grepl("^Kg ", Location), 
+                           Location, 
+                           paste("Kg", Location)))
+
+#fix status
+standardize_status <- function(status) {
+  if (grepl("completed|clear|ready to move in", status, ignore.case = TRUE)) {
+    return("Completed")
+  } else if (grepl("under construction|u-cons|propose|earthwork", status, ignore.case = TRUE)) {
+    return("Under Construction")
+  } else if (grepl("pending|tcp approval", status, ignore.case = TRUE)) {
+    return("Under Construction")
+  } else if (grepl("kekal", status, ignore.case = TRUE)) {
+    return("In Perpetuity")
+  } else if (grepl("piling", status, ignore.case = TRUE)) {
+    return("Under Construction")
+  } else if (grepl("Under-Con", status, ignore.case = TRUE)) {
+    return("Under Construction")
+  } else if (grepl("Used House", status, ignore.case = TRUE)) {
+    return("Used")
+  } else if (grepl("freehold", status, ignore.case = TRUE)) {
+    return("Freehold")
+  } else if (status == "") {
+    return(NA)  # Treat empty strings as NA
+  } else {
+    return(status)  # Return original status for anything not matched
+  }
+}
+
+bessproperty <- bessproperty |>
+  mutate(Status = sapply(Status, standardize_status))
+
+bessproperty <- bessproperty |>
+  mutate(Status = case_when(
+    is.na(Status) ~ NA_character_,
+    grepl("completed", Status, ignore.case = TRUE) ~ "Completed",
+    grepl("Under-COn", Status, ignore.case = TRUE) ~ "Under Construction",
+    grepl("Under-COn", Status, ignore.case = TRUE) ~ "Under Construction",
+    grepl("UNder-COn", Status, ignore.case = TRUE) ~ "Under Construction",
+    grepl("in perpetuity", Status, ignore.case = TRUE) ~ "In Perpetuity",
+    grepl("Pilling", Status, ignore.case = TRUE) ~ "Under Construction",  
+    grepl("freehold", Status, ignore.case = TRUE) ~ "Freehold",
+    grepl("used house", Status, ignore.case = TRUE) ~ "Used House",
+    grepl("drawing approved", Status, ignore.case = TRUE) ~ "Approved",
+    grepl("Start construction", Status, ignore.case = TRUE) ~ "Under Construction",
+    grepl("Terrace", Status, ignore.case = TRUE) ~ NA,
+    grepl("Bangalow", Status, ignore.case = TRUE) ~ NA,
+    grepl("Detached", Status, ignore.case = TRUE) ~ NA,
+    grepl("2", Status, ignore.case = TRUE) ~ NA,
+    grepl("3", Status, ignore.case = TRUE) ~ NA,
+    grepl("25", Status, ignore.case = TRUE) ~ NA,
+    TRUE ~ Status  # Keep the original value if no conditions are met
+  ))
+
+
+unique(bessproperty$Status)
+
+#fix bd 
+unique(bessproperty$`BED/T&B`)
+
+bessproperty <- bessproperty |>
+  mutate(`BED/T&B` = case_when(
+    is.na(`BED/T&B`) ~ NA_character_,
+    grepl("Shop", `BED/T&B`, ignore.case = TRUE) ~ NA,
+    TRUE ~ `BED/T&B`  # Keep the original value if no conditions are met
+  ))
+
+bessproperty <- bessproperty |>
+  separate(`BED/T&B`, into = c("Bedrooms", "Bathrooms"), sep = " ", extra = "drop", fill = "right") |>
+  mutate(Bathrooms = ifelse(Bathrooms == "-T", NA, Bathrooms)) |>
+  mutate(Bedrooms = ifelse(grepl("B", Bedrooms), as.numeric(gsub("B", "", Bedrooms)), NA),
+         Bathrooms = ifelse(grepl("T", Bathrooms), as.numeric(gsub("T", "", Bathrooms)), NA))
+
+unique(bessproperty$Bathrooms)
+
+
+#fix sq ft
+unique(bessproperty$`Built-up Area`)
+
+bessproperty <- bessproperty |>
+  mutate(`Built-up Area` = str_remove_all(`Built-up Area`, ","),  # Remove commas
+         `Built-up Area` = str_extract(`Built-up Area`, "(?<=-\\s|^)[0-9]+(?:\\s*-\\s*[0-9]+)?"),  # Capture first number or range after "-" or at the start
+         `Built-up Area` = str_replace_all(`Built-up Area`, "\\s+", " "),  # Normalize spaces
+         `Built-up Area` = str_trim(`Built-up Area`),  # Trim leading/trailing spaces
+         `Built-up Area` = str_extract(`Built-up Area`, "^[0-9]+"),  # Keep only the first numeric value
+         `Built-up Area` = as.numeric(`Built-up Area`))  # Convert to numeric
+
+bessproperty <- bessproperty |>
+  mutate(`Built-up Area` = ifelse(`Built-up Area` < 1000, NA, `Built-up Area`))
+
+bessproperty$`Built-up Area` <- as.numeric(bessproperty$`Built-up Area`)
+
+
+#fix acre
+bessproperty <- bessproperty |>
+  mutate(`Land Area` = gsub("^(\\d+\\.\\d{0,3}|\\d{1,4})[\\d.]*.*$", "\\1", `Land Area`))
+
+bessproperty <- bessproperty |>
+  mutate(`Land Area` = ifelse(`Land Area` >= 2, NA, `Land Area`))
+
+unique(bessproperty$`Land Area`)
+bessproperty$`Land Area` <- as.numeric(bessproperty$`Land Area`)
+
+#fix title
+unique(bessproperty$Title)
+
+bessproperty <- bessproperty |>
+  mutate(Title = case_when(
+    grepl("perpetuity", Title, ignore.case = TRUE) ~ "In perpetuity",
+    grepl("lease", Title, ignore.case = TRUE) ~ "Leasehold",
+    grepl("strata", Title, ignore.case = TRUE) ~ "Strata",
+    grepl("kekal", Title, ignore.case = TRUE) ~ "In perpetuity",
+    TRUE ~ NA_character_  
+  ))
+
+bessproperty <- bessproperty |>
+  mutate(Title = ifelse(tolower(Status) == "in perpetuity", "In perpetuity", Title),
+         Status = ifelse(tolower(Status) == "in perpetuity", NA_character_, Status))
+
+#fix price
+bessproperty <- bessproperty |>
+  mutate(Price = as.numeric(gsub("BND |,", "", Price))) |>
+  filter (Price > 10000) 
+
+row <- bessproperty |>
+  filter (Price > 10000000)
+
+View(row)
+
+bessproperty <- bessproperty |>
+  filter(Price != 800000000)
+
+#fix category
+unique(bessproperty$Price)
+
+bessproperty <- bessproperty |>
+  mutate(Category = case_when(
+    grepl("DETACHED", Category, ignore.case = TRUE) ~ "Detached",
+    grepl("SEMI-DETACHED", Category, ignore.case = TRUE) ~ "Semi-detached",
+    grepl("SEMI-BANGALOW", Category, ignore.case = TRUE) ~ "Semi-detached",
+    grepl("BANGALOW", Category, ignore.case = TRUE) ~ "Bungalow",
+    grepl("STILT HOUSE", Category, ignore.case = TRUE) ~ "Bungalow",  
+    grepl("APARTMENT", Category, ignore.case = TRUE) ~ "Apartment",
+    grepl("TERRACE", Category, ignore.case = TRUE) ~ "Terrace",
+    TRUE ~ NA_character_  
+  ))
+
+#fix date
+unique(bessproperty$date)
+
+bessproperty <- bessproperty |>
+  mutate(date = gsub(" UTC", "", date),
+         date = as.Date(date))
+
+bessproperty <- bessproperty |>
+  mutate(date = case_when(
+    date == as.Date("1900-01-03") ~ as.Date("2018-06-13"),
+    TRUE ~ date
+  ))
+
+bessproperty <- bessproperty |>
+  bind_rows(
+    bessproperty |>
+      filter(date == as.Date("2018-06-13")) |>
+      mutate(date = as.Date("2018-03-22"))
+  )
+
+bessproperty <- bessproperty |>
+  distinct()
+
+bessproperty <- bessproperty |>
+  mutate(quarter = paste0(format(date, "%Y"), " ", quarters(date)))
+
+#kampong sync
+unique(bessproperty$Location)
+unique(kpg_mkm_df$kampong)
+
+bessproperty <- bessproperty |>
+  mutate(Location = sub("Kg\\s+", "Kg. ", Location))
+
+bp_unique <- unique(bessproperty$Location)
+kampong <- unique(kpg_mkm_df$kampong)
+
+to_amend <- setdiff(bp_unique, kampong)
+to_amend
+
+bessproperty <- bessproperty |>
+  mutate(Location = case_when(
+    grepl("Kg. Lumapas 'B'", Location, ignore.case = TRUE) ~ "Kg. Lumapas",
+    grepl("Kg. Lumapas 'A'", Location, ignore.case = TRUE) ~ "Kg. Lumapas",
+    grepl("Kg. Pengkalan Batu", Location, ignore.case = TRUE) ~ "Kg. Pangkalan Batu",
+    grepl("Kg. Mumong Selatan", Location, ignore.case = TRUE) ~ "Kg. Mumong B",  
+    grepl("Kg. Manggis Satu", Location, ignore.case = TRUE) ~ "Kg. Manggis",
+    grepl("Kg. Pengkalan Gadong", Location, ignore.case = TRUE) ~ "Kg. Pangkalan Gadong",
+    grepl("Kg. Sungai Tampoi", Location, ignore.case = TRUE) ~ "Kg. Tanjong Bunut",
+    grepl("Kg. Menglait I", Location, ignore.case = TRUE) ~ "Kg. Menglait",
+    grepl("Kg. Perpindahan Bunut", Location, ignore.case = TRUE) ~ "Kg. Bunut Perpindahan",
+    grepl("Kg. Terunjing Baru", Location, ignore.case = TRUE) ~ "Kg. Terunjing",
+    grepl("Kg. Mumong (Mumong Utara)", Location, ignore.case = TRUE) ~ "Kg. Mumong A",
+    grepl("Kg. Batu Bersurat", Location, ignore.case = TRUE) ~ "Kg. Pangkalan Gadong",
+    grepl("Kg. Pelambayan", Location, ignore.case = TRUE) ~ "Kg. Pelambaian",
+    grepl("Kg. Kebangsaan", Location, ignore.case = TRUE) ~ "Kg. Sungai Akar",
+    grepl("Kg. Maraburong Batu", Location, ignore.case = TRUE) ~ "Kg. Maraburong",
+    grepl("Kg. Rasau", Location, ignore.case = TRUE) ~ "Kg. Sungai Teraban",
+    grepl("Kg. Bandar", Location, ignore.case = TRUE) ~ "Pusat Bandar",
+    grepl("Kg. Jalan Maulana", Location, ignore.case = TRUE) ~ "Kg. Pandan",
+    grepl("Kg. Manggis Dua", Location, ignore.case = TRUE) ~ "Kg. Manggis", 
+    grepl("Kg. Kelugus", Location, ignore.case = TRUE) ~ "Kg. Sungai Kelugos", 
+    grepl("Kg. Pekan Belait", Location, ignore.case = TRUE) ~ "Pekan Kuala Belait", 
+    TRUE ~ Location  # Retain original Location if no conditions are met
+  ))
+
+
+#sengkurong, panchor, jalan tutong, lambak, subok, pandan, jalan muara, berakas, lambak kanan, brunei
+
+#sengkurong
+sengkurong <- kpg_mkm_df |>
+  filter(mukim == "Mukim Sengkurong") |>
+  pull(kampong)
+
+bessproperty <- bessproperty |>
+  mutate(Location = if_else(Location == "Kg. Sengkurong",
+                            sample(sengkurong, n(), replace = TRUE),
+                            Location))
+#panchor
+panchor <- bessproperty |> 
+  filter (Location == "Kg. Panchor")
+
+unique(panchor$Price)
+
+View(panchor)
+
+bessproperty <- bessproperty |>
+  mutate(Location = case_when(
+    grepl("Kg. Panchor", Location, ignore.case = TRUE) ~ "Kg. Panchor Murai",
+    TRUE ~ Location  
+  ))
+
+#jalan tutong
+
+jalan_tutong <- bessproperty |>
+  filter(Location == "Kg. Jalan Tutong")
+
+unique(jalan_tutong$`Land Area`)
+
+bessproperty <- bessproperty %>%
+  mutate(Location = case_when(
+    `Land Area` == 0.121 & Location == "Kg. Jalan Tutong" ~ "Kg. Kulapis",
+    TRUE ~ Location  # Keep existing Location for other cases
+  ))
+
+bessproperty <- bessproperty %>%
+  mutate(Location = case_when(
+    `Land Area` == 0.077 & Location == "Kg. Jalan Tutong" ~ "Kg. Salar",
+    TRUE ~ Location  # Keep existing Location for other cases
+  ))
+
+bessproperty <- bessproperty %>%
+  mutate(Location = case_when(
+    `Land Area` == 0.100 & Location == "Kg. Jalan Tutong" ~ "Kg. Madewa",
+    TRUE ~ Location  # Keep existing Location for other cases
+  ))
+
+bessproperty <- bessproperty %>%
+  mutate(Location = case_when(
+    `Land Area` == 0.121 & Location == "Kg. Jalan Tutong" ~ "Kg. Kulapis",
+    TRUE ~ Location  # Keep existing Location for other cases
+  ))
+
+bessproperty <- bessproperty %>%
+  mutate(Location = case_when(
+    `Land Area` == 0.040 & Location == "Kg. Jalan Tutong" ~ "Kg. Madewa",
+    TRUE ~ Location  # Keep existing Location for other cases
+  ))
+
+bessproperty <- bessproperty %>%
+  mutate(Location = case_when(
+    `Land Area` == 0.077 & Location == "Kg. Jalan Tutong" ~ "Kg. Pangkalan Batu",
+    TRUE ~ Location  # Keep existing Location for other cases
+  ))
+
+bessproperty <- bessproperty %>%
+   mutate(Price = case_when(
+    `Land Area` == 0.040 & Location == "Kg. Jalan Tutong" ~ 200000,
+     TRUE ~ Price  # Keep existing Category for other cases
+     ))
+
+bessproperty <- bessproperty %>%
+  mutate(Location = case_when(
+    `Land Area` == 0.33 & Location == "Kg. Jalan Tutong" ~ "Kg. Kulapis",
+    TRUE ~ Location  # Keep existing Location for other cases
+  ))
+
+bessproperty <- bessproperty %>%
+  mutate(Location = case_when(
+    `Land Area` == 0.125 & Location == "Kg. Jalan Tutong" ~ "Kg. Kulapis",
+    TRUE ~ Location  # Keep existing Location for other cases
+  ))
+
+bessproperty <- bessproperty %>%
+  mutate(Location = case_when(
+    `Land Area` == 0.097 & Location == "Kg. Jalan Tutong" ~ "Kg. Katok",
+    TRUE ~ Location  # Keep existing Location for other cases
+  ))
+
+bessproperty <- bessproperty |>
+  mutate(Location = case_when(
+    grepl("Kg. Mumong (Mumong Utara)", Location, ignore.case = TRUE) ~ "Kg. Mumong",
+    TRUE ~ Location  
+  ))
+
+View(bessproperty)
+
+bessproperty |>
+  separate (quarter, " ", into = c("Year", "Q")) |>
+  summarise(n(), .by = Year)
+
+lambak_kanan <- bessproperty |>
+  filter(Location == "Kg. Lambak Kanan")
+View(lambak_kanan)
+
+# Ensure randomness applies only when previous Location is "Kg. Lambak Kanan"
+set.seed(123)  # For consistent randomization
+bessproperty <- bessproperty %>%
+  mutate(Location = case_when(
+    Location == "Kg. Lambak Kanan" & `Built-up Area` == 4954 ~ sample(c("Perumahan Negara Lambak Kanan Kawasan 1", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 2", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 3",
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 4", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 5"), 1),
+    Location == "Kg. Lambak Kanan" & `Built-up Area` == 4715 ~ sample(c("Perumahan Negara Lambak Kanan Kawasan 1", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 2", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 3",
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 4", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 5"), 1),
+    Location == "Kg. Lambak Kanan" & `Built-up Area` == 3640 ~ sample(c("Perumahan Negara Lambak Kanan Kawasan 1", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 2", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 3",
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 4", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 5"), 1),
+    Location == "Kg. Lambak Kanan" & `Built-up Area` == 3096 ~ sample(c("Perumahan Negara Lambak Kanan Kawasan 1", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 2", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 3",
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 4", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 5"), 1),
+    Location == "Kg. Lambak Kanan" & `Built-up Area` == 3819 ~ sample(c("Perumahan Negara Lambak Kanan Kawasan 1", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 2", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 3",
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 4", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 5"), 1),
+    Location == "Kg. Lambak Kanan" & `Built-up Area` == 4580 ~ sample(c("Perumahan Negara Lambak Kanan Kawasan 1", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 2", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 3",
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 4", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 5"), 1),
+    Location == "Kg. Lambak Kanan" & `Built-up Area` == 3158 ~ sample(c("Perumahan Negara Lambak Kanan Kawasan 1", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 2", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 3",
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 4", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 5"), 1),
+    Location == "Kg. Lambak Kanan" & `Built-up Area` == 4010 ~ sample(c("Perumahan Negara Lambak Kanan Kawasan 1", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 2", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 3",
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 4", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 5"), 1),
+    Location == "Kg. Lambak Kanan" & `Built-up Area` == 3097 ~ sample(c("Perumahan Negara Lambak Kanan Kawasan 1", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 2", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 3",
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 4", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 5"), 1),
+    Location == "Kg. Lambak Kanan" & `Built-up Area` == 3366 ~ sample(c("Perumahan Negara Lambak Kanan Kawasan 1", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 2", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 3",
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 4", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 5"), 1),
+    Location == "Kg. Lambak Kanan" & `Built-up Area` == 4716 ~ sample(c("Perumahan Negara Lambak Kanan Kawasan 1", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 2", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 3",
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 4", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 5"), 1),
+    Location == "Kg. Lambak Kanan" & `Built-up Area` == 4011 ~ sample(c("Perumahan Negara Lambak Kanan Kawasan 1", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 2", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 3",
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 4", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 5"), 1),
+    Location == "Kg. Lambak Kanan" & `Built-up Area` == 4581 ~ sample(c("Perumahan Negara Lambak Kanan Kawasan 1", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 2", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 3",
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 4", 
+                                                                        "Perumahan Negara Lambak Kanan Kawasan 5"), 1),
+    TRUE ~ Location  # Keep existing Location for other cases
+  ))
+
+
+bessproperty <- bessproperty |>
+  mutate(Location = case_when(
+    grepl("Kg. Subok", Location, ignore.case = TRUE) ~ "Kg. Subok Kota Batu",
+    TRUE ~ Location  
+  ))
+
+bessproperty <- bessproperty |>
+  mutate(Location = case_when(
+    grepl("Kg. Sungai Buloh I", Location, ignore.case = TRUE) ~ "Kg. Sungai Buloh",
+    TRUE ~ Location  
+  ))
+
+pandan <- bessproperty |>
+  filter(Location == "Kg. Pandan")
+View(pandan)
+unique(pandan$`Built-up Area`)
+
+mapping <- c(
+  "Kg. Pandan A" = 3000,
+  "Kg. Pandan B" = 1420,
+  "Kg. Pandan A" = 1800,
+  "Kg. Pandan B" = 2422,
+  "Kg. Pandan A" = 3121,
+  "Kg. Pandan B" = 1517,
+  "Kg. Pandan A" = 1528,
+  "Kg. Pandan B" = 3661,
+  "Kg. Pandan A" = 1629,
+  "Kg. Pandan B" = 1000,
+  "Kg. Pandan A" = 1618,
+  "Kg. Pandan B" = 4044,
+  "Kg. Pandan A" = 4000,
+  "Kg. Pandan B" = 6250
+)
+
+bessproperty <- bessproperty %>%
+  mutate(Location = case_when(
+    Location == "Kg. Pandan" & `Built-up Area` %in% mapping ~ names(mapping)[match(`Built-up Area`, mapping)],
+    TRUE ~ Location  # Keep existing Location for other cases
+  ))
+
+lambak <- bessproperty |> 
+  filter(Location == "Kg. Lambak")
+
+locations <- c(
+  "Kg. Lambak Kiri", 
+  "Perumahan Negara Lambak Kanan Kawasan 1", 
+  "Perumahan Negara Lambak Kanan Kawasan 2", 
+  "Perumahan Negara Lambak Kanan Kawasan 3", 
+  "Perumahan Negara Lambak Kanan Kawasan 4", 
+  "Perumahan Negara Lambak Kanan Kawasan 5"
+)
+
+# Create a mapping for each unique Built-up Area to a consistent Location
+mapping <- setNames(sample(locations, length(unique(lambak$`Built-up Area`)), replace = TRUE), 
+                    unique(lambak$`Built-up Area`))
+
+# Update the bessproperty dataframe
+bessproperty <- bessproperty %>%
+  mutate(Location = case_when(
+    Location == "Kg. Lambak" & `Built-up Area` %in% names(mapping) ~ mapping[as.character(`Built-up Area`)],
+    TRUE ~ Location  # Keep existing Location for other cases
+  ))
+
+bp_unique <- unique(bessproperty$Location)
+kampong <- unique(kpg_mkm_df$kampong)
+
+to_amend <- setdiff(bp_unique, kampong)
+to_amend
+
+bessproperty <- bessproperty %>%
+  mutate(Location = ifelse(Location == "Kg. Pandan", "Kg. Pandan A", Location))
+
+bessproperty <- bessproperty %>%
+  mutate(Location = ifelse(Location == "Lambak Kanan", "Kg. Lambak Kiri", Location))
+
+bessproperty <- bessproperty %>%
+  mutate(Location = ifelse(Location == "Kg. Mumong (Mumong Utara)", "Kg. Mumong A", Location))
+
+
+lambak <- bessproperty |> 
+  filter(Location == "Kg. Lambak")
+unique(lambak$`Built-up Area`)
+
+unique(bessproperty$Location)
+
+unique(jalan_tutong$`Land Area`)
+
+jalan_tutong <- bessproperty |> 
+  filter (Location == "Kg. Jalan Tutong")
+
+muara <- bessproperty |>
+  filter(Location == "Kg. Jalan Muara")
+View(muara)
+# Define the locations
+locations_muara <- c(
+  "Kg. Kapok", 
+  "Perumahan Negara Lambak Kanan Kawasan 1", 
+  "Pekan Muara", 
+  "Kg. Sabun"
+)
+
+# Create a mapping for each unique Built-up Area to a consistent Location
+unique_price <- unique(muara$Price)
+mapping <- setNames(sample(locations_muara, length(unique_price), replace = TRUE), 
+                    unique_price)
+
+# Update the bessproperty dataframe
+bessproperty <- bessproperty %>%
+  mutate(Location = case_when(
+    Location == "Kg. Jalan Muara" & Price %in% names(mapping) ~ mapping[as.character(Price)],
+    TRUE ~ Location  # Keep existing Location for other cases
+  ))
+
+bessproperty <- bessproperty %>%
+  filter(Location != "Kg. Brunei")
+
+berakas <- bessproperty |>
+  filter(Location == "Kg. Berakas")
+
+unique(berakas$`Land Area`)
+
+locations_berakas<- c(
+  "Kg. Burong Pingai Berakas", 
+  "Kg. Jaya Setia",
+  "Kg. Anggerek Desa",
+  "Kg. Pancha Delima"
+  
+)
+
+# Create a mapping for each unique Built-up Area to a consistent Location
+unique_price <- unique(berakas$Price)
+mapping <- setNames(sample(locations_berakas, length(unique_price), replace = TRUE), 
+                    unique_price)
+
+# Update the bessproperty dataframe
+bessproperty <- bessproperty %>%
+  mutate(Location = case_when(
+    Location == "Kg. Berakas" & Price %in% names(mapping) ~ mapping[as.character(Price)],
+    TRUE ~ Location  # Keep existing Location for other cases
+  ))
+
